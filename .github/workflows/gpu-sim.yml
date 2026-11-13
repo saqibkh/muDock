@@ -1,0 +1,70 @@
+name: GPU Simulator
+
+# Builds the HIP backend for gfx942 and runs the HIP score tests
+# (test_score_adt_impl_HIP_*, which compare the HIP result with the CPU
+# reference) on a simulated AMD Instinct MI300X
+# (https://github.com/pantheongpu/pantheonsim). The simulator is functional
+# only: it does not replace testing on real AMD GPUs.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "mudock/**"
+      - "application/**"
+      - "test/**"
+      - "data/**"
+      - "cmake/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hip-tests:
+    name: HIP tests (ROCm 7.1 and simulated MI300X)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and ROCm
+        uses: pantheongpu/setup-pantheonsim@68edfd58c091361dd6baf060b63de412e544d858 # v0.1.7
+        with:
+          gpu: amd/mi300x
+          cuda-toolkit: none
+          rocm: "7.1"
+
+      # The action installs only the compiler side of ROCm. find_package(hip)
+      # also needs the comgr and HSA runtime CMake packages, and the HIP
+      # backend uses hipRAND.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends comgr hsa-rocr hiprand-dev rocrand-dev \
+            libboost-program-options-dev libboost-graph-dev libboost-fiber-dev libboost-context-dev \
+            libopenbabel-dev libeigen3-dev
+
+      # Tests cannot be enabled in a Release build, so this is RelWithDebInfo (-O2).
+      - name: Configure
+        run: cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_PREFIX_PATH=/opt/rocm
+          -DMUDOCK_ENABLE_HIP=ON
+          -DMUDOCK_GPU_ARCHITECTURES=amd:gfx942
+          -DMUDOCK_ENABLE_TEST=ON
+
+      - name: Build
+        run: cmake --build build -j3
+
+      - name: Run HIP tests
+        working-directory: build
+        run: vgpu run ctest -R HIP --output-on-failure --no-tests=error --timeout 1800
